@@ -1,57 +1,82 @@
-import requests
+from django.http import JsonResponse
 from rest_framework.decorators import api_view
-from rest_framework.response import Response
+import requests
+from requests.auth import HTTPBasicAuth
+import datetime
 import base64
-from datetime import datetime
-from django.conf import settings
+import os
 
-# Safaricom Daraja credentials (replace with sandbox/live credentials)
-MPESA_SHORTCODE = '174379'
-MPESA_PASSKEY = 'YOUR_PASSKEY'
-MPESA_CONSUMER_KEY = 'YOUR_CONSUMER_KEY'
-MPESA_CONSUMER_SECRET = 'YOUR_CONSUMER_SECRET'
-MPESA_CALLBACK_URL = 'https://yourdomain.com/api/mpesa/callback/'  # change if live
+# Load M-Pesa credentials from .env
+MPESA_SHORTCODE = os.getenv('MPESA_SHORTCODE')
+MPESA_PASSKEY = os.getenv('MPESA_PASSKEY')
+MPESA_CONSUMER_KEY = os.getenv('MPESA_CONSUMER_KEY')
+MPESA_CONSUMER_SECRET = os.getenv('MPESA_CONSUMER_SECRET')
+MPESA_CALLBACK_URL = os.getenv('MPESA_CALLBACK_URL')
+
+# Sandbox URLs
+MPESA_OAUTH_URL = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
+MPESA_STK_PUSH_URL = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
+
 
 def get_access_token():
-    url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-    response = requests.get(url, auth=(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET))
-    return response.json().get('access_token')
+    """Get OAuth access token from Safaricom"""
+    response = requests.get(MPESA_OAUTH_URL, auth=HTTPBasicAuth(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET))
+    response.raise_for_status()
+    return response.json()['access_token']
+
+
+def generate_password(timestamp):
+    """Generate password for STK Push"""
+    data_to_encode = MPESA_SHORTCODE + MPESA_PASSKEY + timestamp
+    encoded_string = base64.b64encode(data_to_encode.encode())
+    return encoded_string.decode('utf-8')
+
 
 @api_view(['POST'])
 def stk_push(request):
-    phone_number = request.data.get('phone')
-    amount = request.data.get('amount')
-    
-    if not phone_number or not amount:
-        return Response({"error": "Phone number and amount are required"}, status=400)
-    
+    """
+    Trigger M-Pesa STK Push
+    POST JSON body: {"phone": "2547XXXXXXXX", "amount": 100}
+    """
+    data = request.data
+    phone = data.get('phone')
+    amount = data.get('amount')
+
+    if not phone or not amount:
+        return JsonResponse({"error": "Phone and amount are required"}, status=400)
+
+    # Timestamp in format YYYYMMDDHHMMSS
+    timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+    password = generate_password(timestamp)
     access_token = get_access_token()
-    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-    password = base64.b64encode(f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()).decode()
-    
-    stk_push_request = {
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+
+    payload = {
         "BusinessShortCode": MPESA_SHORTCODE,
         "Password": password,
         "Timestamp": timestamp,
         "TransactionType": "CustomerPayBillOnline",
-        "Amount": amount,
-        "PartyA": phone_number,
+        "Amount": int(amount),
+        "PartyA": phone,
         "PartyB": MPESA_SHORTCODE,
-        "PhoneNumber": phone_number,
+        "PhoneNumber": phone,
         "CallBackURL": MPESA_CALLBACK_URL,
-        "AccountReference": "TestPayment",
-        "TransactionDesc": "Payment for testing"
+        "AccountReference": "DjangoAppPayment",
+        "TransactionDesc": "Payment from Django app"
     }
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
+    try:
+        response = requests.post(MPESA_STK_PUSH_URL, json=payload, headers=headers)
+        response.raise_for_status()
+        return JsonResponse(response.json())
+    except requests.RequestException as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
-    response = requests.post(
-        "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
-        json=stk_push_request,
-        headers=headers
-    )
-    
-    return Response(response.json())
+
+@api_view(['POST'])
+def stk_callback(request):
+    """
+    Handle M-Pesa callback
+    """
+    print("Callback received:", request.data)
+    return JsonResponse({"status": "success"})

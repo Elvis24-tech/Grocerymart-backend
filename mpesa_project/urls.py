@@ -3,5 +3,5 @@ from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/mpesa/', include('mpesa.urls')),  # link the mpesa app
+    path('api/mpesa/', include('mpesa.urls')),
 ]
